@@ -1,0 +1,18 @@
+{
+	"services": {
+		"web": {
+			"root": ".",
+			"framework": "sveltekit-1",
+			"buildCommand": "npm run build"
+		}
+	},
+	"rewrites": [
+		{
+			"source": "/(.*)",
+			"destination": {
+				"type": "service",
+				"service": "web"
+			}
+		}
+	]
+}

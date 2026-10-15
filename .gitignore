@@ -1,0 +1,35 @@
+node_modules
+
+# Output
+.output
+.vercel
+.netlify
+.wrangler
+/.svelte-kit
+/build
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+/src/generated/prisma
+
+# Dados locais: uploads de criativos, capturas de teste e log do dev.
+# Em produção os uploads ficam num Volume do Railway, fora do repo.
+/data
+
+# Estado local de ferramentas
+.omc/
+
+.vercel
+.env*

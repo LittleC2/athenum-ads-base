@@ -1,0 +1,436 @@
+// Schema do Athenum Ads: plataforma de tráfego pago com portal do cliente
+// (somente leitura) e painel do gestor (campanhas, relatórios, copiloto IA).
+// Valores em dinheiro ficam em centavos (Int) pra não acumular erro de ponto
+// flutuante nas somas do dashboard.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// --- Enums ----------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  CLIENT
+}
+
+enum ClientStatus {
+  ATIVO
+  PAUSADO
+  ENCERRADO
+}
+
+// Qual ação da Meta conta como "resultado" principal da conta.
+enum ResultType {
+  LEAD_FORM
+  WHATSAPP
+  PURCHASE
+  LINK_CLICK
+}
+
+enum Level {
+  CAMPAIGN
+  ADSET
+  AD
+}
+
+enum AlertSeverity {
+  RED
+  YELLOW
+  GREEN
+}
+
+enum AlertStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+enum ReportStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum DraftObjective {
+  LEADS_FORM
+  LEADS_WHATSAPP
+  TRAFFIC
+}
+
+enum DraftStatus {
+  DRAFT
+  REVIEW
+  UPLOADING
+  UPLOADED
+  ACTIVE
+  FAILED
+}
+
+enum ActionStatus {
+  PENDING
+  APPROVED
+  EXECUTED
+  REJECTED
+  FAILED
+}
+
+enum ActionSource {
+  COPILOT
+  MANUAL
+}
+
+enum AssetKind {
+  IMAGE
+  VIDEO
+}
+
+enum CopyStatus {
+  SUGGESTED
+  APPROVED
+  REJECTED
+}
+
+// --- Auth e clientes ------------------------------------------------------
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  name               String
+  passwordHash       String
+  role               Role      @default(CLIENT)
+  clientId           String?
+  client             Client?   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  active             Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  failedLogins       Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  createdAt          DateTime  @default(now())
+
+  sessions    Session[]
+  chatThreads ChatThread[]
+
+  @@index([clientId])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Client {
+  id        String       @id @default(cuid())
+  slug      String       @unique
+  name      String
+  segment   String?
+  status    ClientStatus @default(ATIVO)
+  notes     String?
+  createdAt DateTime     @default(now())
+
+  users     User[]
+  brief     ClientBrief?
+  accounts  AdAccount[]
+  reports   Report[]
+  feedbacks ResultFeedback[]
+  assets    Asset[]
+  drafts    CampaignDraft[]
+  copies    CopyVariant[]
+}
+
+// Contexto que o Claude usa pra propor campanhas e escrever copys.
+model ClientBrief {
+  id           String   @id @default(cuid())
+  clientId     String   @unique
+  client       Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  offer        String?
+  audience     String?
+  tone         String?
+  ticketCents  Int?
+  closeRatePct Float?
+  restrictions String?
+  extra        String?
+  updatedAt    DateTime @updatedAt
+}
+
+model AdAccount {
+  id                   String     @id @default(cuid())
+  clientId             String
+  client               Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  externalId           String     @unique // act_123...
+  name                 String
+  pageId               String?
+  igUserId             String?
+  resultType           ResultType @default(LEAD_FORM)
+  monthlyBudgetCents   Int?
+  targetCostCents      Int? // custo por resultado alvo
+  maxDailyBudgetCents  Int? // trava de segurança pra campanhas novas
+  tokenEnv             String? // nome da variável de ambiente com o token deste cliente (opcional)
+  advertiserIdentityId String? // ID do anunciante verificado (DSA) que a Meta exige em algumas contas
+  currency             String     @default("BRL")
+  active               Boolean    @default(true)
+  syncedAt             DateTime?
+  backfilledAt         DateTime?
+  lastSyncError        String?
+  createdAt            DateTime   @default(now())
+
+  entities MetaEntity[]
+  insights InsightDaily[]
+  alerts   Alert[]
+  reports  Report[]
+  drafts   CampaignDraft[]
+
+  @@index([clientId])
+}
+
+// --- Dados da Meta (cache) --------------------------------------------------
+
+model MetaEntity {
+  id               String    @id @default(cuid())
+  accountId        String
+  account          AdAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  level            Level
+  externalId       String
+  campaignId       String?
+  adsetId          String?
+  name             String
+  status           String?
+  effectiveStatus  String?
+  objective        String?
+  dailyBudgetCents Int?
+  thumbnailUrl     String?
+  metaCreatedAt    DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([accountId, level, externalId])
+  @@index([accountId, level])
+}
+
+model InsightDaily {
+  id          String    @id @default(cuid())
+  accountId   String
+  account     AdAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  level       Level
+  entityId    String
+  entityName  String
+  campaignId  String?
+  adsetId     String?
+  date        DateTime  @db.Date
+  spendCents  Int       @default(0)
+  impressions Int       @default(0)
+  clicks      Int       @default(0)
+  linkClicks  Int       @default(0)
+  results     Int       @default(0) // conforme AdAccount.resultType
+  conversations Int     @default(0) // conversas iniciadas (mensagem)
+  depth2      Int       @default(0) // conversas com 2+ mensagens do lead
+  actions     Json?
+
+  @@unique([accountId, level, entityId, date])
+  @@index([accountId, level, date])
+  @@index([accountId, campaignId, date])
+}
+
+// Respostas de consultas ao vivo (alcance e frequência não somam por dia).
+model InsightCache {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  payload   Json
+  fetchedAt DateTime @default(now())
+}
+
+// --- Alertas, relatórios, retorno do cliente ---------------------------------
+
+model Alert {
+  id              String        @id @default(cuid())
+  accountId       String
+  account         AdAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  kind            String
+  severity        AlertSeverity
+  entityId        String        @default("")
+  entityName      String?
+  title           String
+  detail          String
+  visibleToClient Boolean       @default(false)
+  clientTitle     String?
+  clientDetail    String?
+  status          AlertStatus   @default(OPEN)
+  firstSeenAt     DateTime      @default(now())
+  lastSeenAt      DateTime      @default(now())
+  resolvedAt      DateTime?
+
+  @@unique([accountId, kind, entityId])
+  @@index([accountId, status])
+}
+
+model Report {
+  id              String       @id @default(cuid())
+  clientId        String
+  client          Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  accountId       String?
+  account         AdAccount?   @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  kind            String       @default("SEMANAL")
+  periodStart     DateTime     @db.Date
+  periodEnd       DateTime     @db.Date
+  status          ReportStatus @default(DRAFT)
+  title           String
+  kpis            Json?
+  clientSummary   String       @default("")
+  internalAnalysis String      @default("")
+  recommendations Json?
+  generatedBy     String       @default("template")
+  createdAt       DateTime     @default(now())
+  publishedAt     DateTime?
+
+  @@index([clientId, status])
+}
+
+// O cliente informa o que virou venda: fecha o ciclo de qualidade do lead.
+model ResultFeedback {
+  id           String   @id @default(cuid())
+  clientId     String
+  client       Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  periodStart  DateTime @db.Date
+  periodEnd    DateTime @db.Date
+  qualified    Int?
+  sales        Int?
+  revenueCents Int?
+  note         String?
+  createdAt    DateTime @default(now())
+
+  @@index([clientId, periodStart])
+}
+
+// --- Fluxo de campanha -------------------------------------------------------
+
+model Asset {
+  id           String    @id @default(cuid())
+  clientId     String
+  client       Client    @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  kind         AssetKind
+  name         String
+  filePath     String
+  mimeType     String
+  sizeBytes    Int
+  metaImageHash String?
+  metaVideoId  String?
+  createdAt    DateTime  @default(now())
+
+  @@index([clientId])
+}
+
+model CampaignDraft {
+  id             String         @id @default(cuid())
+  clientId       String
+  client         Client         @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  accountId      String
+  account        AdAccount      @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name           String
+  objective      DraftObjective
+  status         DraftStatus    @default(DRAFT)
+  spec           Json
+  plannerNotes   String?
+  metaCampaignId String?
+  metaState      Json?
+  lastError      String?
+  createdById    String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  copies CopyVariant[]
+
+  @@index([clientId, status])
+}
+
+model CopyVariant {
+  id          String        @id @default(cuid())
+  clientId    String
+  client      Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  draftId     String?
+  draft       CampaignDraft? @relation(fields: [draftId], references: [id], onDelete: SetNull)
+  angle       String
+  primaryText String
+  headline    String
+  description String?
+  cta         String?
+  status      CopyStatus    @default(SUGGESTED)
+  lintFlags   Json?
+  source      String        @default("claude")
+  createdAt   DateTime      @default(now())
+
+  @@index([clientId, status])
+}
+
+// Toda escrita na Meta passa por aqui: o copiloto propõe, o gestor aprova.
+model ProposedAction {
+  id          String       @id @default(cuid())
+  clientId    String?
+  accountId   String?
+  source      ActionSource
+  type        String
+  summary     String
+  payload     Json
+  status      ActionStatus @default(PENDING)
+  result      Json?
+  error       String?
+  createdById String?
+  decidedById String?
+  decidedAt   DateTime?
+  createdAt   DateTime     @default(now())
+
+  @@index([status, createdAt])
+}
+
+model ChatThread {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  clientId  String?
+  title     String?
+  createdAt DateTime      @default(now())
+  messages  ChatMessage[]
+
+  @@index([userId])
+}
+
+model ChatMessage {
+  id        String     @id @default(cuid())
+  threadId  String
+  thread    ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  role      String // user | assistant
+  content   String
+  createdAt DateTime   @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  clientId  String?
+  accountId String?
+  action    String
+  target    String?
+  payload   Json?
+  ok        Boolean  @default(true)
+  error     String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([clientId, createdAt])
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}

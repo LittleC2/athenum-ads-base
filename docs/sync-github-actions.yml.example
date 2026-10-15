@@ -1,0 +1,28 @@
+# Sincroniza as contas de anúncios com a Meta a cada 3 horas (o Netlify não roda tarefas longas).
+# Segredos necessários (Settings > Secrets and variables > Actions): DATABASE_URL, META_ADS_ACCESS_TOKEN
+# e, se houver, os META_TOKEN_* de cada cliente.
+name: sync-meta
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      META_ADS_ACCESS_TOKEN: ${{ secrets.META_ADS_ACCESS_TOKEN }}
+      META_GRAPH_VERSION: v21.0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run ads -- sync-todas
+      - run: npm run ads -- avisos
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
